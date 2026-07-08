@@ -18,22 +18,27 @@
 # limitations under the License.
 
 usage() {
-    echo "Usage: $0 <gcc_version> <arch> <output_dir>"
+    echo "Usage: $0 <gcc_version> <arch> <output_dir> [host]"
     echo ""
     echo "  gcc_version  GCC version to build"
     echo "  arch         Target architecture (x86_64, armv7, aarch64)"
     echo "  output_dir   Directory where the toolchain archive will be saved"
+    echo "  host         Host where the toolchain will run on (x86_64, aarch64, default: x86_64)"
     echo ""
     echo "Examples:"
     echo "  $0 14.3.0 x86_64 ."
     echo "  $0 13.2.0 aarch64 ."
+    echo "  $0 13.2.0 aarch64 . aarch64"
     echo ""
     echo "Output format: gcc-toolchain-{gcc_version}-{arch}.tar.xz"
+    echo "               gcc-toolchain-{gcc_version}-{arch}-host-{host}.tar.xz (when host != x86_64)"
 }
 
 readonly gcc_version=$1
 readonly arch=$2
 readonly output_dir=$3
+readonly DEFAULT_HOST="x86_64"
+readonly host="${4:-$DEFAULT_HOST}"
 
 set -o errexit -o nounset -o pipefail
 
@@ -76,9 +81,26 @@ case "${arch}" in
         ;;
 esac
 
-echo "INFO: Building GCC ${gcc_version} toolchain for ${arch} architecture..."
+case "${host}" in
+  x86_64|aarch64)
+        ;;
+  *)
+        >&2 echo "ERROR: unsupported host '${host}'. Supported host architectures: x86_64, aarch64"
+        >&2 echo ""
+        usage
+        exit 1
+        ;;
+esac
 
-output_filename="gcc-toolchain-${gcc_version}-${arch}.tar.xz"
+echo "INFO: Building GCC ${gcc_version} toolchain for ${arch} architecture and ${host}..."
+
+# Archives for the default host keep the historical unqualified name; only non-default
+# hosts get the -host-{host} suffix. This avoids shipping duplicate archives.
+if [[ "${host}" == "${DEFAULT_HOST}" ]]; then
+    output_filename="gcc-toolchain-${gcc_version}-${arch}.tar.xz"
+else
+    output_filename="gcc-toolchain-${gcc_version}-${arch}-host-${host}.tar.xz"
+fi
 container_source_dir="/var/builds/toolchain"
 
 echo "INFO: building toolchain inside container..."
@@ -86,12 +108,13 @@ echo "INFO: building toolchain inside container..."
 project_dir="$(git rev-parse --show-toplevel)"
 build_dir="${project_dir}"
 output=$(realpath "${output_dir}/${output_filename}")
-image_tag=$(tr '[:upper:]' '[:lower:]' <<<"${arch}")
+image_tag=$(tr '[:upper:]' '[:lower:]' <<<"${arch}-host-${host}")
 
 (cd "${build_dir}"; \
     docker build \
         --build-arg ARCH="${arch}" \
         --build-arg GCC_VERSION="${gcc_version}" \
+        --build-arg HOST_ARCH="${host}" \
         --tag "${image_tag}" \
         --target toolchain \
         .)

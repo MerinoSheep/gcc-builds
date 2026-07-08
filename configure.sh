@@ -19,6 +19,13 @@
 
 set -o errexit -o nounset -o pipefail
 
+readonly host_arch="${HOST_ARCH:-x86_64}"
+case "${host_arch}" in
+    x86_64)  host_triplet="x86_64-linux-gnu"  ;;
+    aarch64) host_triplet="aarch64-linux-gnu"  ;;
+    *)       >&2 echo "ERROR: Unsupported HOST_ARCH '${host_arch}'. Supported: x86_64, aarch64"; exit 1 ;;
+esac
+
 args=(
     --with-pic
 )
@@ -30,9 +37,9 @@ if [[ "${ARCH}" == "aarch64" ]]; then
         --target="${target}"
     )
     if [[ "${IS_GCC_BUILD:-}" == "1" ]]; then
-        args+=(--host=x86_64-linux-gnu)
-        readonly toolchain_root="/opt/gcc/x86_64"
-        readonly toolchain_prefix="${toolchain_root}/bin/x86_64-linux"
+        args+=(--host="${host_triplet}")
+        readonly toolchain_root="/opt/gcc/${host_arch}"
+        readonly toolchain_prefix="${toolchain_root}/bin/${host_arch}-linux"
     else
         args+=(--host="${target}")
         readonly toolchain_root="/opt/gcc/aarch64"
@@ -49,9 +56,9 @@ elif [[ "${ARCH}" == "armv7" ]]; then
         --with-mode=arm
     )
     if [[ "${IS_GCC_BUILD:-}" == "1" ]]; then
-        args+=(--host=x86_64-linux-gnu)
-        readonly toolchain_root="/opt/gcc/x86_64"
-        readonly toolchain_prefix="${toolchain_root}/bin/x86_64-linux"
+        args+=(--host="${host_triplet}")
+        readonly toolchain_root="/opt/gcc/${host_arch}"
+        readonly toolchain_prefix="${toolchain_root}/bin/${host_arch}-linux"
     else
         args+=(--host="${target}")
         readonly toolchain_root="/opt/gcc/armv7"
@@ -61,11 +68,17 @@ elif [[ "${ARCH}" == "x86_64" ]]; then
     readonly target="x86_64-linux"
     args+=(
         --build=x86_64-linux-gnu
-        --host="${target}"
         --target="${target}"
     )
-    readonly toolchain_root="/opt/gcc/x86_64"
-    readonly toolchain_prefix="${toolchain_root}/bin/x86_64-linux"
+    if [[ "${IS_GCC_BUILD:-}" == "1" ]]; then
+        args+=(--host="${host_triplet}")
+        readonly toolchain_root="/opt/gcc/${host_arch}"
+        readonly toolchain_prefix="${toolchain_root}/bin/${host_arch}-linux"
+    else
+        args+=(--host="${target}")
+        readonly toolchain_root="/opt/gcc/x86_64"
+        readonly toolchain_prefix="${toolchain_root}/bin/x86_64-linux"
+    fi
 fi
 
 export AR="${toolchain_prefix}-ar"
@@ -83,6 +96,23 @@ export STRIP="${toolchain_prefix}-strip"
 
 args+=("${@}")
 
+# Canadian cross (build != host): GCC's configure cannot use the just-built compiler to
+# build the target libraries, and its fallback resolution is unsafe — when build == target
+# (e.g. an x86_64-targeting toolchain hosted on aarch64) it accepts the build machine's
+# unprefixed 'cc' (the distro compiler, wrong version) because no '${target}-cc' name
+# exists anywhere. Pin every target compiler to the same-version cross toolchain instead.
+if [[ "${IS_GCC_BUILD:-}" == "1" && "${host_arch}" != "x86_64" \
+        && -d /opt/gcc/same_version_cross ]]; then
+    readonly cross_bin="/opt/gcc/same_version_cross/bin"
+    args+=(
+        GCC_FOR_TARGET="${cross_bin}/${target}-gcc"
+        CC_FOR_TARGET="${cross_bin}/${target}-gcc"
+        CXX_FOR_TARGET="${cross_bin}/${target}-g++"
+        RAW_CXX_FOR_TARGET="${cross_bin}/${target}-g++"
+        GFORTRAN_FOR_TARGET="${cross_bin}/${target}-gfortran"
+    )
+fi
+
 readonly common_flags=(
     -O2
     -falign-functions=32
@@ -90,10 +120,19 @@ readonly common_flags=(
     -fdata-sections
 )
 
+# Host-side binaries (IS_GCC_BUILD) running on a non-x86_64 host must link libgcc/libstdc++
+# statically to stay hermetic. Target-side artifacts (glibc, libX11, ...) must not vary with
+# HOST_ARCH, so this never applies to them.
+cross_ldflags=""
+if [[ "${IS_GCC_BUILD:-}" == "1" && "${host_arch}" != "x86_64" ]]; then
+    cross_ldflags="-static-libgcc -static-libstdc++"
+fi
+readonly cross_ldflags
+
 args+=(
     CFLAGS="${common_flags[*]}"
     CXXFLAGS="${common_flags[*]}"
-    LDFLAGS="-Wl,-z,max-page-size=0x1000 -Wl,--strip-all -Wl,--as-needed"
+    LDFLAGS="-Wl,-z,max-page-size=0x1000 -Wl,--strip-all -Wl,--as-needed ${cross_ldflags}"
 )
 
 ../configure "${args[@]}" 1> >(tee configure.stdout) 2> >(>&2 tee configure.stderr)
